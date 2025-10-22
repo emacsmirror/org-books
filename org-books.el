@@ -1,6 +1,6 @@
 ;;; org-books.el --- Reading list management with Org mode and helm   -*- lexical-binding: t -*-
 
-;; Copyright (C) 2017 Abhinav Tushar
+;; Copyright (C) 2017-2025 Abhinav Tushar
 
 ;; Author: Abhinav Tushar <abhinav@lepisma.xyz>
 ;; Version: 0.3.0
@@ -133,8 +133,7 @@ is not supported, throw an error."
       (when (s-matches? (car pattern-fn-pair) url-host-string)
         (setq output (funcall (cdr pattern-fn-pair) url))
         (cl-return)))
-    (if (eq output 'no-match)
-        (error (format "Url %s not understood" url))
+    (unless (eq output 'no-match)
       output)))
 
 (defun org-books-create-file (file-path)
@@ -222,9 +221,16 @@ cursor to add log entry."
   "Add book from web URL."
   (interactive "sUrl: ")
   (let ((details (org-books-get-details url)))
-    (if (null details)
-        (message "Error in fetching url. Please retry.")
-      (apply #'org-books-add-book details))))
+    (if details
+        (apply #'org-books-add-book details)
+      ;; When the url parsing or fetching fails, we ask user manually for
+      ;; basic details while setting the URL property to the originally
+      ;; given url.
+      (message "Error in fetching url. Please enter details manually or retry.")
+      (let* ((completion-ignore-case t)
+             (title (read-string "Book Title: "))
+             (authors-str (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))))
+        (org-books-add-book title authors-str `(("URL" . ,url)))))))
 
 ;;;###autoload
 (defun org-books-add-isbn (isbn)
