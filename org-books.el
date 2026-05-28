@@ -64,7 +64,9 @@
 (defcustom org-books-url-pattern-dispatches
   '(("^\\(www\\.\\)?amazon\\." . org-books-get-details-amazon)
     ("^\\(www\\.\\)?goodreads\\.com" . org-books-get-details-goodreads)
-    ("openlibrary\\.org" . org-books-get-details-isbn))
+    ("openlibrary\\.org" . org-books-get-details-isbn)
+    ("books\\.google\\." . org-books-get-details-google-books)
+    ("wikipedia\\.org" . org-books-get-details-wikipedia))
   "Pairs of url patterns and functions taking url and returning
 book details. Check documentation of `org-books-get-details' for
 return structure from these functions."
@@ -108,6 +110,39 @@ PAGE-NODE is the return value of `enlive-fetch' on the page url."
 (defun org-books-get-url-from-isbn (isbn)
   "Make and return openlibrary url from ISBN."
   (concat "https://openlibrary.org/api/books?bibkeys=ISBN:" isbn "&jscmd=data&format=json"))
+
+(defun org-books-get-details-google-books (url)
+  "Get book details from Google Books URL."
+  (let* ((page-node (enlive-fetch url))
+         (raw-title (org-books--clean-str (enlive-text (enlive-query page-node [title])))))
+    (when (string-match "^\\(.*\\) - \\(.+\\) - Google Books$" raw-title)
+      (list (match-string 1 raw-title)
+            (match-string 2 raw-title)
+            `(("GOOGLE_BOOKS" . ,url))))))
+
+(defun org-books-get-details-wikipedia (url)
+  "Get book details from Wikipedia URL."
+  (let* ((parsed-url (url-generic-parse-url url))
+         (host (url-host parsed-url))
+         (path (car (split-string (url-filename parsed-url) "?"))))
+    (when (string-match "^/wiki/\\(.+\\)$" path)
+      (let* ((article (match-string 1 path))
+             (api-url (concat "https://" host "/api/rest_v1/page/summary/" article))
+             (json-object-type 'hash-table)
+             (json-array-type 'list)
+             (json-key-type 'string)
+             (json (org-books--get-json api-url))
+             (title (gethash "title" json)))
+        (when title
+          (list title "" `(("WIKIPEDIA" . ,url))))))))
+
+(defun org-books--get-page-title (url)
+  "Fetch page at URL and return HTML title tag content, or nil on failure."
+  (condition-case nil
+      (let* ((page-node (enlive-fetch url))
+             (title (enlive-text (enlive-query page-node [title]))))
+        (when title (org-books--clean-str title)))
+    (error nil)))
 
 (defun org-books-get-details-isbn (url)
   "Get book details from openlibrary ISBN response from URL."
@@ -222,13 +257,21 @@ cursor to add log entry."
   (interactive "sUrl: ")
   (let ((details (org-books-get-details url)))
     (if details
-        (apply #'org-books-add-book details)
+        (let* ((title (nth 0 details))
+               (author (nth 1 details))
+               (props (nth 2 details))
+               (completion-ignore-case t)
+               (final-author (if (string-empty-p author)
+                                 (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))
+                               author)))
+          (org-books-add-book title final-author props))
       ;; When the url parsing or fetching fails, we ask user manually for
       ;; basic details while setting the URL property to the originally
       ;; given url.
       (message "Error in fetching url. Please enter details manually or retry.")
       (let* ((completion-ignore-case t)
-             (title (read-string "Book Title: "))
+             (page-title (org-books--get-page-title url))
+             (title (read-string "Book Title: " page-title))
              (authors-str (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))))
         (org-books-add-book title authors-str `(("URL" . ,url)))))))
 

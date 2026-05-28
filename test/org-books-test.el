@@ -33,6 +33,36 @@
     (should (string-equal (first res) "The Ultimate Hitchhiker's Guide"))
     (should (string-equal (second res) "Douglas Adams"))))
 
+(ert-deftest test-google-books ()
+  (let* ((url "https://books.google.co.in/books/about/About_Face.html?id=4c4XBAAAQBAJ&redir_esc=y")
+         (res (org-books-get-details url)))
+    (should (string-match "About Face" (first res)))
+    (should (string-match "Alan Cooper" (second res)))))
+
+(ert-deftest test-wikipedia-fermat ()
+  (let* ((url "https://en.wikipedia.org/wiki/Fermat%27s_Last_Theorem_(book)")
+         (res (org-books-get-details url)))
+    (should (string-match "Fermat" (first res)))
+    (should (string-equal (second res) ""))))
+
+(ert-deftest test-wikipedia-tuesdays ()
+  (let* ((url "https://en.wikipedia.org/wiki/Tuesdays_with_Morrie")
+         (res (org-books-get-details url)))
+    (should (string-equal (first res) "Tuesdays with Morrie"))
+    (should (string-equal (second res) ""))))
+
+(ert-deftest test-wikipedia-pride ()
+  (let* ((url "https://en.wikipedia.org/wiki/Pride_and_Prejudice")
+         (res (org-books-get-details url)))
+    (should (string-equal (first res) "Pride and Prejudice"))
+    (should (string-equal (second res) ""))))
+
+(ert-deftest test-wikipedia-god-of-small-things ()
+  (let* ((url "https://en.wikipedia.org/wiki/The_God_of_Small_Things")
+         (res (org-books-get-details url)))
+    (should (string-equal (first res) "The God of Small Things"))
+    (should (string-equal (second res) ""))))
+
 (ert-deftest test-basic-insertion ()
   (let* ((pre-file "./test/files/insert-test-pre.org")
          (post-file "./test/files/insert-test-post.org")
