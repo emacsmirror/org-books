@@ -122,19 +122,21 @@ PAGE-NODE is the return value of `enlive-fetch' on the page url."
 
 (defun org-books-get-details-wikipedia (url)
   "Get book details from Wikipedia URL."
-  (let* ((parsed-url (url-generic-parse-url url))
-         (host (url-host parsed-url))
-         (path (car (split-string (url-filename parsed-url) "?"))))
-    (when (string-match "^/wiki/\\(.+\\)$" path)
-      (let* ((article (match-string 1 path))
-             (api-url (concat "https://" host "/api/rest_v1/page/summary/" article))
-             (json-object-type 'hash-table)
-             (json-array-type 'list)
-             (json-key-type 'string)
-             (json (org-books--get-json api-url))
-             (title (gethash "title" json)))
-        (when title
-          (list title "" `(("WIKIPEDIA" . ,url))))))))
+  (condition-case nil
+      (let* ((parsed-url (url-generic-parse-url url))
+             (host (url-host parsed-url))
+             (path (car (split-string (url-filename parsed-url) "?"))))
+        (when (string-match "^/wiki/\\(.+\\)$" path)
+          (let* ((article (match-string 1 path))
+                 (api-url (concat "https://" host "/api/rest_v1/page/summary/" article))
+                 (json-object-type 'hash-table)
+                 (json-array-type 'list)
+                 (json-key-type 'string)
+                 (json (org-books--get-json api-url))
+                 (title (gethash "title" json)))
+            (when (and title (not (string-empty-p title)))
+              (list title "" `(("WIKIPEDIA" . ,url)))))))
+    (error nil)))
 
 (defun org-books--get-page-title (url)
   "Fetch page at URL and return HTML title tag content, or nil on failure."
@@ -261,10 +263,14 @@ cursor to add log entry."
                (author (nth 1 details))
                (props (nth 2 details))
                (completion-ignore-case t)
+               ;; When author is missing (e.g. Wikipedia), confirm title and ask for author
+               (final-title (if (string-empty-p author)
+                                (read-string "Book Title: " title)
+                              title))
                (final-author (if (string-empty-p author)
                                  (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))
                                author)))
-          (org-books-add-book title final-author props))
+          (org-books-add-book final-title final-author props))
       ;; When the url parsing or fetching fails, we ask user manually for
       ;; basic details while setting the URL property to the originally
       ;; given url.
