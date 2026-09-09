@@ -84,6 +84,44 @@ return structure from these functions."
   "Clean TEXT to remove extra whitespaces."
   (s-trim (s-collapse-whitespace text)))
 
+(defun org-books--html-decode-entities (text)
+  "Decode common HTML entities found in TEXT.
+
+This is meant for text pulled out of raw contexts (like inline
+JSON embedded in a page) that libxml does not entity-decode for
+us, since some sites (e.g. Goodreads) double-escape such data."
+  (dolist (pair '(("&amp;" . "&") ("&quot;" . "\"") ("&#39;" . "'")
+                  ("&apos;" . "'") ("&lt;" . "<") ("&gt;" . ">"))
+                text)
+    (setq text (replace-regexp-in-string (regexp-quote (car pair)) (cdr pair) text t t))))
+
+(defun org-books--get-ld-json-objects (page-node)
+  "Return list of parsed JSON-LD objects embedded in PAGE-NODE."
+  (let ((json-object-type 'hash-table)
+        (json-array-type 'list)
+        (json-key-type 'string))
+    (delq nil
+          (mapcar
+           (lambda (el)
+             (when (string= (enlive-attr el 'type) "application/ld+json")
+               (condition-case nil
+                   (json-read-from-string (enlive-text el))
+                 (error nil))))
+           (enlive-get-elements-by-tag-name page-node 'script)))))
+
+(defun org-books--find-ld-json-book (objects)
+  "Find a schema.org Book entry within OBJECTS.
+
+OBJECTS is a list of parsed JSON-LD values, as returned by
+`org-books--get-ld-json-objects'. Descends into \"@graph\" lists
+where needed."
+  (cl-labels ((search-obj (obj)
+                (cond
+                 ((and (hash-table-p obj) (equal (gethash "@type" obj) "Book")) obj)
+                 ((hash-table-p obj) (search-obj (gethash "@graph" obj)))
+                 ((listp obj) (cl-some #'search-obj obj)))))
+    (cl-some #'search-obj objects)))
+
 (defun org-books-get-details-amazon-authors (page-node)
   "Return author names for amazon PAGE-NODE.
 
@@ -99,13 +137,49 @@ PAGE-NODE is the return value of `enlive-fetch' on the page url."
     (if (not (string-equal title ""))
         (list title author `(("AMAZON" . ,url))))))
 
+(defun org-books-get-details-goodreads--ld-json (page-node url)
+  "Get book details for goodreads PAGE-NODE using its embedded JSON-LD data.
+
+This is the primary strategy since Goodreads keeps a full,
+untruncated author list here (the on-page contributor list is
+often cut short behind a \"...more\" toggle), and it avoids
+accidentally picking up an author's name a second time from an
+unrelated \"About the author\" widget elsewhere on the page."
+  (let ((book (org-books--find-ld-json-book (org-books--get-ld-json-objects page-node))))
+    (when book
+      (let* ((raw-authors (gethash "author" book))
+             (authors (if (hash-table-p raw-authors) (list raw-authors) raw-authors))
+             (title (org-books--clean-str
+                     (org-books--html-decode-entities (or (gethash "name" book) ""))))
+             (author (org-books--clean-str
+                      (org-books--html-decode-entities
+                       (s-join ", " (delq nil (mapcar (lambda (a) (and (hash-table-p a) (gethash "name" a)))
+                                                       authors)))))))
+        (unless (string-equal title "")
+          (list title author `(("GOODREADS" . ,url))))))))
+
+(defun org-books-get-details-goodreads--scrape (page-node url)
+  "Get book details for goodreads PAGE-NODE by scraping displayed elements.
+
+Fallback for when JSON-LD data is not present. The contributor
+query is scoped to the metadata section's contributor list so it
+does not also match the (differently purposed) author bio widget
+further down the page, which shares the same CSS class and would
+otherwise duplicate the primary author's name."
+  (let* ((title (org-books--clean-str (enlive-text (enlive-query page-node [.Text__title1]))))
+         (author (org-books--clean-str
+                  (s-join ", " (mapcar #'enlive-text
+                                        (enlive-query-all
+                                         page-node
+                                         [.BookPageMetadataSection__contributor .ContributorLink__name]))))))
+    (unless (string-equal title "")
+      (list title author `(("GOODREADS" . ,url))))))
+
 (defun org-books-get-details-goodreads (url)
   "Get book details from Goodreads URL."
-  (let* ((page-node (enlive-fetch url))
-         (title (org-books--clean-str (enlive-text (enlive-query page-node [.Text__title1]))))
-         (author (org-books--clean-str (s-join ", " (mapcar #'enlive-text (enlive-query-all page-node [.ContributorLink__name] ))))))
-    (if (not (string-equal title ""))
-        (list title author `(("GOODREADS" . ,url))))))
+  (let ((page-node (enlive-fetch url)))
+    (or (org-books-get-details-goodreads--ld-json page-node url)
+        (org-books-get-details-goodreads--scrape page-node url))))
 
 (defun org-books-get-url-from-isbn (isbn)
   "Make and return openlibrary url from ISBN."

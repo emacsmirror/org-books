@@ -1,0 +1,53 @@
+<html>
+<head><title>ignore</title></head>
+<body>
+<h1 class="Text Text__title1" data-testid="bookTitle">The Sandman, Vol. 1: Preludes &amp; Nocturnes</h1>
+<div class="BookPageMetadataSection">
+  <div class="BookPageMetadataSection__contributor">
+    <h3 class="Text Text__title3 Text__regular" aria-label="List of contributors">
+      <div class="ContributorLinksList">
+        <span tabindex="-1">
+          <a class="ContributorLink" href="https://www.goodreads.com/author/show/1.Neil_Gaiman">
+            <span class="ContributorLink__name" data-testid="name">Neil Gaiman</span>
+          </a>
+          <span tabindex="-1">, </span>
+          <a class="ContributorLink" href="https://www.goodreads.com/author/show/2.Sam_Kieth">
+            <span class="ContributorLink__name" data-testid="name">Sam Kieth</span>
+            <span data-testid="role" class="ContributorLink__role"> (Illustrator)</span>
+          </a>
+          <span tabindex="-1">, </span>
+          <a class="ContributorLink" href="https://www.goodreads.com/author/show/3.Mike_Dringenberg">
+            <span class="ContributorLink__name" data-testid="name">Mike Dringenberg</span>
+            <span data-testid="role" class="ContributorLink__role"> (Illustrator)</span>
+          </a>
+        </span>
+      </div>
+      <div class="Button__container">
+        <button type="button" class="Button Button--inline Button--medium" aria-label="Show all contributors">
+          <span class="Button__labelItem">...more</span>
+        </button>
+      </div>
+    </h3>
+  </div>
+</div>
+
+<!-- Unrelated "About the author" widget further down the page. It reuses
+     the ContributorLink__name class for the primary author, which used to
+     cause the name to be picked up twice by a page-wide CSS query. -->
+<div class="FeaturedPerson__container">
+  <div class="FeaturedPerson__info">
+    <div class="FeaturedPerson__infoPrimary">
+      <h4 class="Text Text__title4">
+        <a class="ContributorLink" href="https://www.goodreads.com/author/show/1.Neil_Gaiman">
+          <span class="ContributorLink__name" data-testid="name">Neil Gaiman</span>
+        </a>
+      </h4>
+    </div>
+  </div>
+</div>
+
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Book","name":"The Sandman, Vol. 1: Preludes &amp; Nocturnes","author":[{"@type":"Person","name":"Neil Gaiman"},{"@type":"Person","name":"Sam Kieth"},{"@type":"Person","name":"Mike Dringenberg"},{"@type":"Person","name":"Malcolm Jones III"},{"@type":"Person","name":"Todd Klein"},{"@type":"Person","name":"Karen  Berger"},{"@type":"Person","name":"Daniel Vozzo"}]}
+</script>
+</body>
+</html>

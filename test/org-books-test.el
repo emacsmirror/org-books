@@ -13,7 +13,52 @@
   (let* ((url "https://www.goodreads.com/book/show/23754.Preludes_Nocturnes")
          (res (org-books-get-details url)))
     (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
-    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger"))))
+    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
+
+(defun org-books-test--parse-fixture (file-path)
+  "Parse an HTML fixture at FILE-PATH into an enlive page node."
+  (enlive-parse (f-read-text file-path 'utf-8)))
+
+(ert-deftest test-goodreads-ld-json-no-duplicate-author ()
+  "Author list should come from the (untruncated) JSON-LD data, and
+should not include the primary author twice even though the page
+also has an unrelated \"About the author\" widget sharing the same
+CSS class as the contributor list."
+  (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample.html"))
+         (res (org-books-get-details-goodreads--ld-json page-node "https://example.com/book")))
+    (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
+    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
+
+(ert-deftest test-goodreads-scrape-fallback-no-duplicate-author ()
+  "Without JSON-LD data, the CSS-based fallback should still avoid
+picking up the primary author's name a second time from the
+unrelated \"About the author\" widget, even though the on-page
+contributor list is truncated (missing the \"...more\" authors)."
+  (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample-no-ld-json.html"))
+         (res (org-books-get-details-goodreads--scrape page-node "https://example.com/book")))
+    (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
+    (should (string-equal (second res) "Neil Gaiman, Sam Kieth"))))
+
+(ert-deftest test-goodreads-prefers-ld-json-over-scrape ()
+  (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample.html"))
+         (res (org-books-get-details-goodreads--scrape page-node "https://example.com/book")))
+    ;; Sanity check that the fixture used for the ld-json test would, on its
+    ;; own, still trip the fallback's duplicate/truncation issues -- i.e.
+    ;; that the ld-json path is genuinely doing the better job, not just
+    ;; agreeing with a fallback that already handles this fixture fine.
+    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg"))))
+
+(ert-deftest test-html-decode-entities ()
+  (should (string-equal (org-books--html-decode-entities "Preludes &amp; Nocturnes")
+                         "Preludes & Nocturnes"))
+  (should (string-equal (org-books--html-decode-entities "Tom &amp; Jerry&#39;s")
+                         "Tom & Jerry's"))
+  (should (string-equal (org-books--html-decode-entities "no entities here")
+                         "no entities here")))
+
+(ert-deftest test-clean-str ()
+  (should (string-equal (org-books--clean-str "  Karen  Berger  ") "Karen Berger"))
+  (should (string-equal (org-books--clean-str "Single") "Single")))
 
 (ert-deftest test-amazon ()
   (let* ((url "https://www.amazon.com/Organization-Man-William-H-Whyte/dp/0812218191")
@@ -64,7 +109,12 @@
     (should (string-equal (second res) ""))))
 
 (ert-deftest test-basic-insertion ()
-  (let* ((pre-file "./test/files/insert-test-pre.org")
+  ;; The expected fixture assumes drawers get indented under their heading,
+  ;; which Org only does when `org-adapt-indentation' is non-nil. Newer Org
+  ;; versions (9.7+) default this to nil, so bind it explicitly to keep this
+  ;; test independent of the Org version/config it happens to run under.
+  (let* ((org-adapt-indentation t)
+         (pre-file "./test/files/insert-test-pre.org")
          (post-file "./test/files/insert-test-post.org")
          (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8))))
     (with-current-buffer (find-file-noselect org-books-file)
