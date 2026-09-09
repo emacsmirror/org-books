@@ -3,7 +3,7 @@
 ;; Copyright (C) 2017-2026 Abhinav Tushar
 
 ;; Author: Abhinav Tushar <abhinav@lepisma.xyz>
-;; Version: 0.3.2
+;; Version: 0.4.0
 ;; Package-Requires: ((org "9.3") (emacs "25"))
 ;; URL: https://github.com/lepisma/org-books
 ;; Keywords: outlines
