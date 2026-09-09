@@ -1,0 +1,10 @@
+#+TITLE: Test file
+
+* Book category
+
+** Existing Book
+   :PROPERTIES:
+   :AUTHOR:   Some Author
+   :ADDED:    [2020-05-10]
+   :GOODREADS: https://www.goodreads.com/book/show/999
+   :END:

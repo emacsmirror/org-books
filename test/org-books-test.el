@@ -108,6 +108,69 @@ contributor list is truncated (missing the \"...more\" authors)."
     (should (string-equal (first res) "The God of Small Things"))
     (should (string-equal (second res) ""))))
 
+(ert-deftest test-find-duplicate-by-property ()
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8))))
+    (unwind-protect
+        (progn
+          (should (org-books--find-duplicate
+                   "Some Other Title" "Some Other Author"
+                   '(("GOODREADS" . "https://www.goodreads.com/book/show/999"))))
+          (should-not (org-books--find-duplicate
+                       "Some Other Title" "Some Other Author"
+                       '(("GOODREADS" . "https://www.goodreads.com/book/show/111")))))
+      (f-delete org-books-file))))
+
+(ert-deftest test-find-duplicate-by-title-author ()
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8))))
+    (unwind-protect
+        (progn
+          ;; Case-insensitive match on title + author, even with no shared property.
+          (should (org-books--find-duplicate "existing book" "some author" nil))
+          (should-not (org-books--find-duplicate "A Totally Different Book" "Some Author" nil)))
+      (f-delete org-books-file))))
+
+(ert-deftest test-add-book-duplicate-declined ()
+  "When the user declines to add a probable duplicate, the normal
+category-picking/insertion flow should never run."
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
+         (helm-called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+          (org-books-add-book "Existing Book" "Some Author")
+          (should-not helm-called))
+      (f-delete org-books-file))))
+
+(ert-deftest test-add-book-duplicate-confirmed ()
+  "When the user confirms adding anyway, the normal insertion flow
+still runs."
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
+         (helm-called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+          (org-books-add-book "Existing Book" "Some Author")
+          (should helm-called))
+      (f-delete org-books-file))))
+
+(ert-deftest test-add-book-no-duplicate-skips-prompt ()
+  "A genuinely new book should not trigger the duplicate prompt at all."
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
+         (prompted nil)
+         (helm-called nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) (setq prompted t) t))
+                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+          (org-books-add-book "A Brand New Book" "Nobody Yet")
+          (should-not prompted)
+          (should helm-called))
+      (f-delete org-books-file))))
+
 (ert-deftest test-basic-insertion ()
   ;; The expected fixture assumes drawers get indented under their heading,
   ;; which Org only does when `org-adapt-indentation' is non-nil. Newer Org

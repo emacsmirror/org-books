@@ -61,6 +61,14 @@
   :type 'integer
   :group 'org-books)
 
+(defcustom org-books-duplicate-check-properties
+  '("URL" "GOODREADS" "AMAZON" "ISBN" "GOOGLE_BOOKS" "WIKIPEDIA")
+  "Property names checked, in addition to matching title and
+author, when looking for a possible duplicate before adding a new
+book. See `org-books-add-book'."
+  :type '(repeat string)
+  :group 'org-books)
+
 (defcustom org-books-url-pattern-dispatches
   '(("^\\(www\\.\\)?amazon\\." . org-books-get-details-amazon)
     ("^\\(www\\.\\)?goodreads\\.com" . org-books-get-details-goodreads)
@@ -291,6 +299,37 @@ from `org-map-entries'."
                                ignore-sym))
                            match scope skip)))))
 
+(defun org-books--entry-duplicate-p (title author props)
+  "Tell if the org-books entry at point looks like a duplicate of a
+new entry defined by TITLE, AUTHOR and PROPS.
+
+A match on the value of any property named in
+`org-books-duplicate-check-properties' shared with PROPS counts
+as a duplicate, as does a case-insensitive match on both title
+and author."
+  (or (cl-some (lambda (prop-name)
+                 (let ((entry-val (org-entry-get nil prop-name))
+                       (new-val (cdr (assoc prop-name props))))
+                   (and entry-val new-val (string-equal entry-val new-val))))
+               org-books-duplicate-check-properties)
+      (let ((entry-title (org-get-heading t t t t))
+            (entry-author (org-entry-get nil "AUTHOR")))
+        (and entry-title entry-author
+             (string-equal (downcase (org-books--clean-str entry-title))
+                            (downcase (org-books--clean-str title)))
+             (string-equal (downcase (org-books--clean-str entry-author))
+                            (downcase (org-books--clean-str author)))))))
+
+(defun org-books--find-duplicate (title author props)
+  "Return the marker of an existing entry in `org-books-file' that
+looks like a duplicate of TITLE, AUTHOR and PROPS, or nil if none
+is found."
+  (-first #'identity
+          (org-books-map-entries
+           (lambda ()
+             (when (org-books--entry-duplicate-p title author props)
+               (point-marker))))))
+
 (defun org-books--get-active-books (&optional todo-keyword)
   "Return books that are currently active. Each item returned is
 a pair of book name and position of the headline. Activity is
@@ -419,25 +458,33 @@ specifying the position in the file."
 (defun org-books-add-book (title author &optional props)
   "Add a book (specified by TITLE and AUTHOR) to the `org-books-file'.
 
-Optionally apply PROPS."
+Optionally apply PROPS. If an entry that looks like a duplicate
+(matching one of `org-books-duplicate-check-properties', or the
+same title and author) already exists, ask for confirmation
+before adding another one."
   (interactive
    (let ((completion-ignore-case t))
      (list
       (read-string "Book Title: ")
       (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors))))))
-  (if org-books-file
-      (save-excursion
-        (with-current-buffer (find-file-noselect org-books-file)
-          (let ((headers (org-books-get-headers)))
-            (if headers
-                (helm :sources (helm-build-sync-source "org-book categories"
-                                 :candidates (mapcar (lambda (h) (cons (car h) (marker-position (cdr h)))) headers)
-                                 :action (lambda (pos) (org-books--insert-at-pos pos title author props)))
-                      :buffer "*helm org-books add*")
-              (goto-char (point-max))
-              (org-books--insert 1 title author props)
-              (save-buffer)))))
-    (message "org-books-file not set")))
+  (cond
+   ((not org-books-file) (message "org-books-file not set"))
+   ((and (org-books--find-duplicate title author props)
+         (not (y-or-n-p (format "\"%s\" by %s looks like it is already in %s. Add it anyway? "
+                                 title author (file-name-nondirectory org-books-file)))))
+    (message "org-books: skipped adding \"%s\", already present." title))
+   (t
+    (save-excursion
+      (with-current-buffer (find-file-noselect org-books-file)
+        (let ((headers (org-books-get-headers)))
+          (if headers
+              (helm :sources (helm-build-sync-source "org-book categories"
+                               :candidates (mapcar (lambda (h) (cons (car h) (marker-position (cdr h)))) headers)
+                               :action (lambda (pos) (org-books--insert-at-pos pos title author props)))
+                    :buffer "*helm org-books add*")
+            (goto-char (point-max))
+            (org-books--insert 1 title author props)
+            (save-buffer))))))))
 
 ;;;###autoload
 (defun org-books-rate-book (rating)
