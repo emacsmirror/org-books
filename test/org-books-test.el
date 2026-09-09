@@ -3,7 +3,6 @@
 (load-file "org-books.el")
 
 (require 'f)
-(require 's)
 
 (defun files-equal (file-a file-b)
   (string-equal (f-read-text file-a 'utf-8)
@@ -27,12 +26,14 @@ since `org-books-get-details' and friends are asynchronous."
 (ert-deftest test-goodreads ()
   (let* ((url "https://www.goodreads.com/book/show/23754.Preludes_Nocturnes")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
-    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
+    (should (string-equal (nth 0 res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
+    (should (string-equal (nth 1 res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
 
 (defun org-books-test--parse-fixture (file-path)
-  "Parse an HTML fixture at FILE-PATH into an enlive page node."
-  (enlive-parse (f-read-text file-path 'utf-8)))
+  "Parse an HTML fixture at FILE-PATH into a dom.el page node."
+  (with-temp-buffer
+    (insert (f-read-text file-path 'utf-8))
+    (libxml-parse-html-region (point-min) (point-max))))
 
 (ert-deftest test-goodreads-ld-json-no-duplicate-author ()
   "Author list should come from the (untruncated) JSON-LD data, and
@@ -41,8 +42,8 @@ also has an unrelated \"About the author\" widget sharing the same
 CSS class as the contributor list."
   (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample.html"))
          (res (org-books-get-details-goodreads--ld-json page-node "https://example.com/book")))
-    (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
-    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
+    (should (string-equal (nth 0 res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
+    (should (string-equal (nth 1 res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
 
 (ert-deftest test-goodreads-scrape-fallback-no-duplicate-author ()
   "Without JSON-LD data, the CSS-based fallback should still avoid
@@ -51,8 +52,8 @@ unrelated \"About the author\" widget, even though the on-page
 contributor list is truncated (missing the \"...more\" authors)."
   (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample-no-ld-json.html"))
          (res (org-books-get-details-goodreads--scrape page-node "https://example.com/book")))
-    (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
-    (should (string-equal (second res) "Neil Gaiman, Sam Kieth"))))
+    (should (string-equal (nth 0 res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
+    (should (string-equal (nth 1 res) "Neil Gaiman, Sam Kieth"))))
 
 (ert-deftest test-goodreads-prefers-ld-json-over-scrape ()
   (let* ((page-node (org-books-test--parse-fixture "./test/files/goodreads-sample.html"))
@@ -61,7 +62,7 @@ contributor list is truncated (missing the \"...more\" authors)."
     ;; own, still trip the fallback's duplicate/truncation issues -- i.e.
     ;; that the ld-json path is genuinely doing the better job, not just
     ;; agreeing with a fallback that already handles this fixture fine.
-    (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg"))))
+    (should (string-equal (nth 1 res) "Neil Gaiman, Sam Kieth, Mike Dringenberg"))))
 
 (ert-deftest test-html-decode-entities ()
   (should (string-equal (org-books--html-decode-entities "Preludes &amp; Nocturnes")
@@ -78,60 +79,60 @@ contributor list is truncated (missing the \"...more\" authors)."
 (ert-deftest test-amazon ()
   (let* ((url "https://www.amazon.com/Organization-Man-William-H-Whyte/dp/0812218191")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "The Organization Man"))
-    (should (string-equal (second res) "William H. Whyte, Joseph Nocera"))))
+    (should (string-equal (nth 0 res) "The Organization Man"))
+    (should (string-equal (nth 1 res) "William H. Whyte, Joseph Nocera"))))
 
 (ert-deftest test-amazon-with-author-page ()
   (let* ((url "https://www.amazon.com/Elements-Programming-Style-2nd/dp/0070342075")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "The Elements of Programming Style, 2nd Edition"))
-    (should (string-equal (second res) "Brian W. Kernighan, P. J. Plauger"))))
+    (should (string-equal (nth 0 res) "The Elements of Programming Style, 2nd Edition"))
+    (should (string-equal (nth 1 res) "Brian W. Kernighan, P. J. Plauger"))))
 
 (ert-deftest test-isbn ()
   (let* ((isbn "0517149257")
 	       (res (org-books-test--sync #'org-books-get-details (org-books-get-url-from-isbn isbn))))
-    (should (string-equal (first res) "The Ultimate Hitchhiker's Guide"))
-    (should (string-equal (second res) "Douglas Adams"))))
+    (should (string-equal (nth 0 res) "The Ultimate Hitchhiker's Guide"))
+    (should (string-equal (nth 1 res) "Douglas Adams"))))
 
 (ert-deftest test-isbn-multiple-authors ()
   "All authors of a multi-author book should be returned, not just the first."
   (let* ((isbn "0201633612")
          (res (org-books-test--sync #'org-books-get-details (org-books-get-url-from-isbn isbn))))
-    (should (string-equal (first res) "Design Patterns"))
-    (should (string-match "Erich Gamma" (second res)))
-    (should (string-match "Richard Helm" (second res)))
-    (should (string-match "Ralph Johnson" (second res)))
-    (should (string-match "John Vlissides" (second res)))))
+    (should (string-equal (nth 0 res) "Design Patterns"))
+    (should (string-match "Erich Gamma" (nth 1 res)))
+    (should (string-match "Richard Helm" (nth 1 res)))
+    (should (string-match "Ralph Johnson" (nth 1 res)))
+    (should (string-match "John Vlissides" (nth 1 res)))))
 
 (ert-deftest test-google-books ()
   (let* ((url "https://books.google.co.in/books/about/About_Face.html?id=4c4XBAAAQBAJ&redir_esc=y")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-match "About Face" (first res)))
-    (should (string-match "Alan Cooper" (second res)))))
+    (should (string-match "About Face" (nth 0 res)))
+    (should (string-match "Alan Cooper" (nth 1 res)))))
 
 (ert-deftest test-wikipedia-fermat ()
   (let* ((url "https://en.wikipedia.org/wiki/Fermat%27s_Last_Theorem_(book)")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-match "Fermat" (first res)))
-    (should (string-equal (second res) ""))))
+    (should (string-match "Fermat" (nth 0 res)))
+    (should (string-equal (nth 1 res) ""))))
 
 (ert-deftest test-wikipedia-tuesdays ()
   (let* ((url "https://en.wikipedia.org/wiki/Tuesdays_with_Morrie")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "Tuesdays with Morrie"))
-    (should (string-equal (second res) ""))))
+    (should (string-equal (nth 0 res) "Tuesdays with Morrie"))
+    (should (string-equal (nth 1 res) ""))))
 
 (ert-deftest test-wikipedia-pride ()
   (let* ((url "https://en.wikipedia.org/wiki/Pride_and_Prejudice")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "Pride and Prejudice"))
-    (should (string-equal (second res) ""))))
+    (should (string-equal (nth 0 res) "Pride and Prejudice"))
+    (should (string-equal (nth 1 res) ""))))
 
 (ert-deftest test-wikipedia-god-of-small-things ()
   (let* ((url "https://en.wikipedia.org/wiki/The_God_of_Small_Things")
          (res (org-books-test--sync #'org-books-get-details url)))
-    (should (string-equal (first res) "The God of Small Things"))
-    (should (string-equal (second res) ""))))
+    (should (string-equal (nth 0 res) "The God of Small Things"))
+    (should (string-equal (nth 1 res) ""))))
 
 (ert-deftest test-find-duplicate-by-property ()
   (let* ((pre-file "./test/files/duplicate-test-pre.org")
@@ -161,12 +162,12 @@ contributor list is truncated (missing the \"...more\" authors)."
 category-picking/insertion flow should never run."
   (let* ((pre-file "./test/files/duplicate-test-pre.org")
          (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
-         (helm-called nil))
+         (picker-called nil))
     (unwind-protect
         (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
-                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+                  ((symbol-function 'completing-read) (lambda (&rest _) (setq picker-called t) "Book category")))
           (org-books-add-book "Existing Book" "Some Author")
-          (should-not helm-called))
+          (should-not picker-called))
       (f-delete org-books-file))))
 
 (ert-deftest test-add-book-duplicate-confirmed ()
@@ -174,12 +175,12 @@ category-picking/insertion flow should never run."
 still runs."
   (let* ((pre-file "./test/files/duplicate-test-pre.org")
          (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
-         (helm-called nil))
+         (picker-called nil))
     (unwind-protect
         (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
-                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+                  ((symbol-function 'completing-read) (lambda (&rest _) (setq picker-called t) "Book category")))
           (org-books-add-book "Existing Book" "Some Author")
-          (should helm-called))
+          (should picker-called))
       (f-delete org-books-file))))
 
 (ert-deftest test-add-book-no-duplicate-skips-prompt ()
@@ -187,13 +188,24 @@ still runs."
   (let* ((pre-file "./test/files/duplicate-test-pre.org")
          (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8)))
          (prompted nil)
-         (helm-called nil))
+         (picker-called nil))
     (unwind-protect
         (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) (setq prompted t) t))
-                  ((symbol-function 'helm) (lambda (&rest _) (setq helm-called t))))
+                  ((symbol-function 'completing-read) (lambda (&rest _) (setq picker-called t) "Book category")))
           (org-books-add-book "A Brand New Book" "Nobody Yet")
           (should-not prompted)
-          (should helm-called))
+          (should picker-called))
+      (f-delete org-books-file))))
+
+(ert-deftest test-get-headers ()
+  "Category picker candidates should include headings up to
+`org-books-file-depth' as outline paths, without needing helm."
+  (let* ((pre-file "./test/files/duplicate-test-pre.org")
+         (org-books-file (make-temp-file "org-books-test" nil ".org" (f-read-text pre-file 'utf-8))))
+    (unwind-protect
+        (let ((titles (mapcar #'car (org-books-get-headers))))
+          (should (member "Book category" titles))
+          (should (member "Book category/Existing Book" titles)))
       (f-delete org-books-file))))
 
 (ert-deftest test-basic-insertion ()

@@ -1,10 +1,10 @@
-;;; org-books.el --- Reading list management with Org mode and helm   -*- lexical-binding: t -*-
+;;; org-books.el --- Reading list management with Org mode   -*- lexical-binding: t -*-
 
-;; Copyright (C) 2017-2025 Abhinav Tushar
+;; Copyright (C) 2017-2026 Abhinav Tushar
 
 ;; Author: Abhinav Tushar <abhinav@lepisma.xyz>
 ;; Version: 0.3.2
-;; Package-Requires: ((enlive "0.0.1") (s "1.11.0") (helm "2.9.2") (helm-org "1.0") (dash "2.14.1") (org "9.3") (emacs "25"))
+;; Package-Requires: ((org "9.3") (emacs "25"))
 ;; URL: https://github.com/lepisma/org-books
 ;; Keywords: outlines
 
@@ -31,13 +31,11 @@
 ;;; Code:
 
 (require 'cl-lib)
-(require 'dash)
-(require 'enlive)
+(require 'dom)
 (require 'json)
-(require 'helm)
-(require 'helm-org)
 (require 'org)
-(require 's)
+(require 'org-refile)
+(require 'seq)
 (require 'subr-x)
 (require 'url)
 (require 'url-parse)
@@ -93,7 +91,7 @@ current call stack.
 
 A fetch's success/failure callback runs synchronously from deep
 inside the network process filter that delivered it. Driving
-interactive UI (`read-string', `completing-read-multiple', helm)
+interactive UI (`read-string', `completing-read' and friends)
 directly from there is unreliable -- it can hang depending on
 what buffer/window happened to be active when the request went
 out. Routing the interactive continuation through this function
@@ -160,7 +158,7 @@ with a reason string on failure."
 
 (defun org-books--clean-str (text)
   "Clean TEXT to remove extra whitespaces."
-  (s-trim (s-collapse-whitespace text)))
+  (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " text)))
 
 (defun org-books--html-decode-entities (text)
   "Decode common HTML entities found in TEXT.
@@ -173,6 +171,43 @@ us, since some sites (e.g. Goodreads) double-escape such data."
                 text)
     (setq text (replace-regexp-in-string (regexp-quote (car pair)) (cdr pair) text t t))))
 
+(defun org-books--dom-has-class-p (node class)
+  "Tell if NODE's class attribute has CLASS as one of its
+space-separated class names.
+
+This is an exact match against individual class tokens, unlike
+`dom-by-class', whose MATCH argument is a regexp tested against
+the whole class attribute as one string -- so `dom-by-class' can
+false-positive on an unrelated class that merely contains CLASS
+as a substring (e.g. \"author\" also matching a class named
+\"authorNameColumn\", which is a real, observed false match on
+Amazon's product pages)."
+  (let ((class-attr (dom-attr node 'class)))
+    (and class-attr (member class (split-string class-attr)))))
+
+(defun org-books--dom-by-class (node class)
+  "Return elements within NODE (self-inclusive) that have CLASS as
+one of their space-separated class names. See
+`org-books--dom-has-class-p'."
+  (dom-search node (lambda (n) (org-books--dom-has-class-p n class))))
+
+(defun org-books--dom-descendants-by-class (nodes class)
+  "Return elements with class CLASS found within the subtree of any
+node in NODES.
+
+Mirrors a CSS descendant-combinator selector like \".a .b\" when
+NODES is itself the result of a previous `org-books--dom-by-class'
+call -- scoping matches this way (rather than searching the whole
+page) matters: some sites reuse the same class name for an
+unrelated widget elsewhere on the page, and a page-wide search
+would wrongly pick that up too."
+  (seq-mapcat (lambda (node) (org-books--dom-by-class node class)) nodes))
+
+(defun org-books--dom-direct-children-by-tag (node tag)
+  "Return NODE's direct, non-text children that are elements of TAG."
+  (seq-filter (lambda (child) (and (consp child) (eq (dom-tag child) tag)))
+              (dom-non-text-children node)))
+
 (defun org-books--get-ld-json-objects (page-node)
   "Return list of parsed JSON-LD objects embedded in PAGE-NODE."
   (let ((json-object-type 'hash-table)
@@ -181,11 +216,13 @@ us, since some sites (e.g. Goodreads) double-escape such data."
     (delq nil
           (mapcar
            (lambda (el)
-             (when (string= (enlive-attr el 'type) "application/ld+json")
+             (when (string= (dom-attr el 'type) "application/ld+json")
                (condition-case nil
-                   (json-read-from-string (enlive-text el))
+                   ;; `dom-text' (not `dom-texts') since we want the script
+                   ;; tag's raw content -- `dom-texts' deliberately skips it.
+                   (json-read-from-string (dom-text el))
                  (error nil))))
-           (enlive-get-elements-by-tag-name page-node 'script)))))
+           (dom-by-tag page-node 'script)))))
 
 (defun org-books--find-ld-json-book (objects)
   "Find a schema.org Book entry within OBJECTS.
@@ -203,9 +240,13 @@ where needed."
 (defun org-books-get-details-amazon-authors (page-node)
   "Return author names for amazon PAGE-NODE.
 
-PAGE-NODE is the return value of `enlive-fetch' on the page url."
-  (or (mapcar #'enlive-text (enlive-query-all page-node [.a-section .author .contributorNameID]))
-      (mapcar #'enlive-text (enlive-query-all page-node [.a-section .author > a]))))
+PAGE-NODE is a parsed HTML page, as returned by
+`libxml-parse-html-region'."
+  (let ((authors (org-books--dom-descendants-by-class
+                  (org-books--dom-descendants-by-class (list page-node) "a-section")
+                  "author")))
+    (or (mapcar #'dom-texts (org-books--dom-descendants-by-class authors "contributorNameID"))
+        (mapcar #'dom-texts (seq-mapcat (lambda (a) (org-books--dom-direct-children-by-tag a 'a)) authors)))))
 
 (defun org-books-get-details-amazon (url callback)
   "Get book details from amazon URL asynchronously.
@@ -215,8 +256,9 @@ fetch failed."
   (org-books--fetch-html-async
    url
    (lambda (page-node)
-     (let* ((title (org-books--clean-str (enlive-text (enlive-get-element-by-id page-node "productTitle"))))
-            (author (s-join ", " (org-books-get-details-amazon-authors page-node))))
+     (let* ((title (org-books--clean-str
+                    (dom-texts (car (dom-by-id page-node "\\`productTitle\\'")))))
+            (author (string-join (org-books-get-details-amazon-authors page-node) ", ")))
        (funcall callback
                 (unless (string-equal title "")
                   (list title author `(("AMAZON" . ,url)))))))
@@ -238,8 +280,9 @@ unrelated \"About the author\" widget elsewhere on the page."
                      (org-books--html-decode-entities (or (gethash "name" book) ""))))
              (author (org-books--clean-str
                       (org-books--html-decode-entities
-                       (s-join ", " (delq nil (mapcar (lambda (a) (and (hash-table-p a) (gethash "name" a)))
-                                                       authors)))))))
+                       (string-join (delq nil (mapcar (lambda (a) (and (hash-table-p a) (gethash "name" a)))
+                                                       authors))
+                                    ", ")))))
         (unless (string-equal title "")
           (list title author `(("GOODREADS" . ,url))))))))
 
@@ -251,12 +294,13 @@ query is scoped to the metadata section's contributor list so it
 does not also match the (differently purposed) author bio widget
 further down the page, which shares the same CSS class and would
 otherwise duplicate the primary author's name."
-  (let* ((title (org-books--clean-str (enlive-text (enlive-query page-node [.Text__title1]))))
+  (let* ((title (org-books--clean-str (dom-texts (car (org-books--dom-by-class page-node "Text__title1")))))
          (author (org-books--clean-str
-                  (s-join ", " (mapcar #'enlive-text
-                                        (enlive-query-all
-                                         page-node
-                                         [.BookPageMetadataSection__contributor .ContributorLink__name]))))))
+                  (string-join (mapcar #'dom-texts
+                                        (org-books--dom-descendants-by-class
+                                         (org-books--dom-by-class page-node "BookPageMetadataSection__contributor")
+                                         "ContributorLink__name"))
+                               ", "))))
     (unless (string-equal title "")
       (list title author `(("GOODREADS" . ,url))))))
 
@@ -285,7 +329,7 @@ fetch failed."
   (org-books--fetch-html-async
    url
    (lambda (page-node)
-     (let ((raw-title (org-books--clean-str (enlive-text (enlive-query page-node [title])))))
+     (let ((raw-title (org-books--clean-str (dom-texts (car (dom-by-tag page-node 'title))))))
        (funcall callback
                 (when (string-match "^\\(.*\\) - \\(.+\\) - Google Books$" raw-title)
                   (list (match-string 1 raw-title)
@@ -325,7 +369,7 @@ typically follow up with interactive prompts."
   (org-books--fetch-html-async
    url
    (lambda (page-node)
-     (let ((title (enlive-text (enlive-query page-node [title]))))
+     (let ((title (dom-texts (car (dom-by-tag page-node 'title)))))
        (org-books--defer (lambda () (funcall callback (when title (org-books--clean-str title)))))))
    (lambda (_reason) (org-books--defer (lambda () (funcall callback nil))))))
 
@@ -343,7 +387,7 @@ found or the fetch failed."
        (funcall callback
                 (when (and data title)
                   (list title
-                        (s-join ", " (mapcar (lambda (a) (gethash "name" a)) (gethash "authors" data)))
+                        (string-join (mapcar (lambda (a) (gethash "name" a)) (gethash "authors" data)) ", ")
                         `(("ISBN" . ,url)))))))
    (lambda (_reason) (funcall callback nil))))
 
@@ -363,7 +407,7 @@ are matched to a resolver function -- resolver functions take
         (matched nil)
         (deferred-callback (lambda (result) (org-books--defer (lambda () (funcall callback result))))))
     (cl-dolist (pattern-fn-pair org-books-url-pattern-dispatches)
-      (when (s-matches? (car pattern-fn-pair) url-host-string)
+      (when (string-match-p (car pattern-fn-pair) url-host-string)
         (setq matched t)
         (funcall (cdr pattern-fn-pair) url deferred-callback)
         (cl-return)))
@@ -383,11 +427,12 @@ are matched to a resolver function -- resolver functions take
 (defun org-books-all-authors ()
   "Return a list of authors in the `org-books-file'."
   (with-current-buffer (find-file-noselect org-books-file)
-    (->> (org-property-values "AUTHOR")
-       (-reduce-from (lambda (acc line) (append acc (s-split "," line))) nil)
-       (mapcar #'s-trim)
-       (-distinct)
-       (-sort #'s-less-p))))
+    (seq-sort #'string-lessp
+              (seq-uniq
+               (mapcar #'string-trim
+                       (seq-reduce (lambda (acc line) (append acc (split-string line ",")))
+                                   (org-property-values "AUTHOR")
+                                   nil))))))
 
 (defun org-books-entry-p ()
   "Tell if current entry is an org-books entry."
@@ -406,13 +451,13 @@ Arguments FUNC, MATCH, SCOPE and SKIP follow their definitions
 from `org-map-entries'."
   (with-current-buffer (find-file-noselect org-books-file)
     (let ((ignore-sym (gensym)))
-      (-remove-item ignore-sym
-                    (apply #'org-map-entries
-                           (lambda ()
-                             (if (org-books-entry-p)
-                                 (if (functionp func) (funcall func) (funcall (list 'lambda () func)))
-                               ignore-sym))
-                           match scope skip)))))
+      (delq ignore-sym
+            (apply #'org-map-entries
+                   (lambda ()
+                     (if (org-books-entry-p)
+                         (if (functionp func) (funcall func) (funcall (list 'lambda () func)))
+                       ignore-sym))
+                   match scope skip)))))
 
 (defun org-books--entry-duplicate-p (title author props)
   "Tell if the org-books entry at point looks like a duplicate of a
@@ -439,11 +484,11 @@ and author."
   "Return the marker of an existing entry in `org-books-file' that
 looks like a duplicate of TITLE, AUTHOR and PROPS, or nil if none
 is found."
-  (-first #'identity
-          (org-books-map-entries
-           (lambda ()
-             (when (org-books--entry-duplicate-p title author props)
-               (point-marker))))))
+  (seq-find #'identity
+            (org-books-map-entries
+             (lambda ()
+               (when (org-books--entry-duplicate-p title author props)
+                 (point-marker))))))
 
 (defun org-books--get-active-books (&optional todo-keyword)
   "Return books that are currently active. Each item returned is
@@ -463,10 +508,9 @@ cursor to add log entry."
   (let ((active-books (org-books--get-active-books)))
     (if (null active-books)
         (message "No books active at the moment.")
-      (let ((picked-book
-             (helm :sources (helm-build-sync-source "Active books"
-                              :candidates active-books)
-                   :buffer "*helm active books*")))
+      (let* ((completion-ignore-case t)
+             (choice (completing-read "Book: " (mapcar #'car active-books) nil t))
+             (picked-book (cdr (assoc choice active-books))))
         (find-file org-books-file)
         (goto-char picked-book)
         (unless (re-search-forward "^*+ Log$" nil t)
@@ -503,7 +547,7 @@ failure) come back."
                                  (read-string "Book Title: " title)
                                title))
                 (final-author (if (string-empty-p author)
-                                  (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))
+                                  (string-join (completing-read-multiple "Author(s): " (org-books-all-authors)) ", ")
                                 author)))
            (org-books-add-book final-title final-author props))
        ;; When the url parsing or fetching fails, we ask user manually for
@@ -515,7 +559,7 @@ failure) come back."
         (lambda (page-title)
           (let* ((completion-ignore-case t)
                  (title (read-string "Book Title: " page-title))
-                 (authors-str (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))))
+                 (authors-str (string-join (completing-read-multiple "Author(s): " (org-books-all-authors)) ", ")))
             (org-books-add-book title authors-str `(("URL" . ,url))))))))))
 
 ;;;###autoload
@@ -571,12 +615,13 @@ TITLE, AUTHOR and PROPS are formatted using `org-books-format'."
 (defun org-books-get-headers ()
   "Return list of categories under which books can be filed.
 
-Each item in list is a pair of title (propertized) and marker
-specifying the position in the file."
-  (let ((helm-org-headings-max-depth org-books-file-depth))
-    (mapcar (lambda (it)
-              (cons it (get-text-property 0 'helm-realvalue it)))
-            (helm-org--get-candidates-in-file org-books-file helm-org-headings-fontify t nil t))))
+Each item in list is a pair of title (an outline path string) and
+buffer position specifying the location in the file."
+  (let ((org-refile-targets `((,org-books-file :maxlevel . ,org-books-file-depth)))
+        (org-refile-use-outline-path t)
+        (org-refile-use-cache nil))
+    (mapcar (lambda (target) (cons (car target) (nth 3 target)))
+            (org-refile-get-targets))))
 
 ;;;###autoload
 (defun org-books-add-book (title author &optional props)
@@ -590,7 +635,7 @@ before adding another one."
    (let ((completion-ignore-case t))
      (list
       (read-string "Book Title: ")
-      (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors))))))
+      (string-join (completing-read-multiple "Author(s): " (org-books-all-authors)) ", "))))
   (cond
    ((not org-books-file) (message "org-books-file not set"))
    ((and (org-books--find-duplicate title author props)
@@ -602,10 +647,10 @@ before adding another one."
       (with-current-buffer (find-file-noselect org-books-file)
         (let ((headers (org-books-get-headers)))
           (if headers
-              (helm :sources (helm-build-sync-source "org-book categories"
-                               :candidates (mapcar (lambda (h) (cons (car h) (marker-position (cdr h)))) headers)
-                               :action (lambda (pos) (org-books--insert-at-pos pos title author props)))
-                    :buffer "*helm org-books add*")
+              (let* ((completion-ignore-case t)
+                     (choice (completing-read "Category: " (mapcar #'car headers) nil t))
+                     (pos (cdr (assoc choice headers))))
+                (org-books--insert-at-pos pos title author props))
             (goto-char (point-max))
             (org-books--insert 1 title author props)
             (save-buffer))))))))
@@ -615,7 +660,7 @@ before adding another one."
   "Apply RATING to book at current point."
   (interactive "nRating (stars 1-5): ")
   (if (> rating 0)
-      (org-set-property "RATING" (s-repeat rating ":star:"))))
+      (org-set-property "RATING" (apply #'concat (make-list rating ":star:")))))
 
 (provide 'org-books)
 ;;; org-books.el ends here
