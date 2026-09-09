@@ -75,18 +75,88 @@ book. See `org-books-add-book'."
     ("openlibrary\\.org" . org-books-get-details-isbn)
     ("books\\.google\\." . org-books-get-details-google-books)
     ("wikipedia\\.org" . org-books-get-details-wikipedia))
-  "Pairs of url patterns and functions taking url and returning
-book details. Check documentation of `org-books-get-details' for
-return structure from these functions."
+  "Pairs of url patterns and functions taking (URL CALLBACK) and
+calling CALLBACK (asynchronously, without blocking Emacs) with
+book details or nil. Check documentation of `org-books-get-details'
+for details on the CALLBACK argument and the expected result."
   :type '(alist :key-type string :value-type symbol)
   :group 'org-books)
 
-(defun org-books--get-json (url)
-  "Parse JSON data from given URL."
-  (with-current-buffer (url-retrieve-synchronously url)
-    (goto-char (point-min))
-    (re-search-forward "^$")
-    (json-read)))
+(defcustom org-books-fetch-timeout 15
+  "Seconds to wait for a URL fetch to complete before giving up."
+  :type 'integer
+  :group 'org-books)
+
+(defun org-books--defer (thunk)
+  "Call THUNK (a 0-argument function) shortly, outside of the
+current call stack.
+
+A fetch's success/failure callback runs synchronously from deep
+inside the network process filter that delivered it. Driving
+interactive UI (`read-string', `completing-read-multiple', helm)
+directly from there is unreliable -- it can hang depending on
+what buffer/window happened to be active when the request went
+out. Routing the interactive continuation through this function
+first lets it run as a fresh, ordinary top-level event instead."
+  (run-at-time 0 nil thunk))
+
+(defun org-books--url-retrieve-async (url on-success on-error)
+  "Fetch URL without blocking Emacs.
+
+Calls ON-SUCCESS with the response buffer (point placed right
+after the HTTP headers) on success, or ON-ERROR with a
+human-readable reason string on failure or timeout. Exactly one
+of the two is called, exactly once. The response buffer, if any,
+is killed right after its callback returns."
+  (let* (done
+         (settle (lambda (fn arg buffer)
+                   (unless done
+                     (setq done t)
+                     (unwind-protect (funcall fn arg)
+                       (when (buffer-live-p buffer) (kill-buffer buffer))))))
+         (timer (run-at-time org-books-fetch-timeout nil
+                              (lambda () (funcall settle on-error "timed out" nil)))))
+    (url-retrieve
+     url
+     (lambda (status)
+       (cancel-timer timer)
+       (let ((buffer (current-buffer))
+             (err (plist-get status :error)))
+         (cond
+          (err (funcall settle on-error (format "%S" err) buffer))
+          ((not (progn (goto-char (point-min))
+                       (search-forward-regexp "\n[\t\n ]*\n+" nil t)))
+           (funcall settle on-error "malformed response" buffer))
+          (t (funcall settle on-success buffer buffer)))))
+     nil t)))
+
+(defun org-books--fetch-html-async (url on-success on-error)
+  "Fetch and parse the HTML page at URL without blocking Emacs.
+
+ON-SUCCESS is called with the parsed page node. ON-ERROR is
+called with a reason string on failure."
+  (org-books--url-retrieve-async
+   url
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (decode-coding-region (point) (point-max) 'utf-8)
+       (funcall on-success (libxml-parse-html-region (point) (point-max)))))
+   on-error))
+
+(defun org-books--fetch-json-async (url on-success on-error)
+  "Fetch and parse the JSON document at URL without blocking Emacs.
+
+ON-SUCCESS is called with the parsed value. ON-ERROR is called
+with a reason string on failure."
+  (org-books--url-retrieve-async
+   url
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (let ((json-object-type 'hash-table)
+             (json-array-type 'list)
+             (json-key-type 'string))
+         (funcall on-success (json-read)))))
+   on-error))
 
 (defun org-books--clean-str (text)
   "Clean TEXT to remove extra whitespaces."
@@ -137,13 +207,20 @@ PAGE-NODE is the return value of `enlive-fetch' on the page url."
   (or (mapcar #'enlive-text (enlive-query-all page-node [.a-section .author .contributorNameID]))
       (mapcar #'enlive-text (enlive-query-all page-node [.a-section .author > a]))))
 
-(defun org-books-get-details-amazon (url)
-  "Get book details from amazon URL."
-  (let* ((page-node (enlive-fetch url))
-         (title (org-books--clean-str (enlive-text (enlive-get-element-by-id page-node "productTitle"))))
-         (author (s-join ", " (org-books-get-details-amazon-authors page-node))))
-    (if (not (string-equal title ""))
-        (list title author `(("AMAZON" . ,url))))))
+(defun org-books-get-details-amazon (url callback)
+  "Get book details from amazon URL asynchronously.
+
+Calls CALLBACK with the result list, or nil if not found or the
+fetch failed."
+  (org-books--fetch-html-async
+   url
+   (lambda (page-node)
+     (let* ((title (org-books--clean-str (enlive-text (enlive-get-element-by-id page-node "productTitle"))))
+            (author (s-join ", " (org-books-get-details-amazon-authors page-node))))
+       (funcall callback
+                (unless (string-equal title "")
+                  (list title author `(("AMAZON" . ,url)))))))
+   (lambda (_reason) (funcall callback nil))))
 
 (defun org-books-get-details-goodreads--ld-json (page-node url)
   "Get book details for goodreads PAGE-NODE using its embedded JSON-LD data.
@@ -183,77 +260,115 @@ otherwise duplicate the primary author's name."
     (unless (string-equal title "")
       (list title author `(("GOODREADS" . ,url))))))
 
-(defun org-books-get-details-goodreads (url)
-  "Get book details from Goodreads URL."
-  (let ((page-node (enlive-fetch url)))
-    (or (org-books-get-details-goodreads--ld-json page-node url)
-        (org-books-get-details-goodreads--scrape page-node url))))
+(defun org-books-get-details-goodreads (url callback)
+  "Get book details from Goodreads URL asynchronously.
+
+Calls CALLBACK with the result list, or nil if not found or the
+fetch failed."
+  (org-books--fetch-html-async
+   url
+   (lambda (page-node)
+     (funcall callback
+              (or (org-books-get-details-goodreads--ld-json page-node url)
+                  (org-books-get-details-goodreads--scrape page-node url))))
+   (lambda (_reason) (funcall callback nil))))
 
 (defun org-books-get-url-from-isbn (isbn)
   "Make and return openlibrary url from ISBN."
   (concat "https://openlibrary.org/api/books?bibkeys=ISBN:" isbn "&jscmd=data&format=json"))
 
-(defun org-books-get-details-google-books (url)
-  "Get book details from Google Books URL."
-  (let* ((page-node (enlive-fetch url))
-         (raw-title (org-books--clean-str (enlive-text (enlive-query page-node [title])))))
-    (when (string-match "^\\(.*\\) - \\(.+\\) - Google Books$" raw-title)
-      (list (match-string 1 raw-title)
-            (match-string 2 raw-title)
-            `(("GOOGLE_BOOKS" . ,url))))))
+(defun org-books-get-details-google-books (url callback)
+  "Get book details from Google Books URL asynchronously.
 
-(defun org-books-get-details-wikipedia (url)
-  "Get book details from Wikipedia URL."
+Calls CALLBACK with the result list, or nil if not found or the
+fetch failed."
+  (org-books--fetch-html-async
+   url
+   (lambda (page-node)
+     (let ((raw-title (org-books--clean-str (enlive-text (enlive-query page-node [title])))))
+       (funcall callback
+                (when (string-match "^\\(.*\\) - \\(.+\\) - Google Books$" raw-title)
+                  (list (match-string 1 raw-title)
+                        (match-string 2 raw-title)
+                        `(("GOOGLE_BOOKS" . ,url)))))))
+   (lambda (_reason) (funcall callback nil))))
+
+(defun org-books-get-details-wikipedia (url callback)
+  "Get book details from Wikipedia URL asynchronously.
+
+Calls CALLBACK with the result list, or nil if not found or the
+fetch failed."
   (condition-case nil
       (let* ((parsed-url (url-generic-parse-url url))
              (host (url-host parsed-url))
              (path (car (split-string (url-filename parsed-url) "?"))))
-        (when (string-match "^/wiki/\\(.+\\)$" path)
-          (let* ((article (match-string 1 path))
-                 (api-url (concat "https://" host "/api/rest_v1/page/summary/" article))
-                 (json-object-type 'hash-table)
-                 (json-array-type 'list)
-                 (json-key-type 'string)
-                 (json (org-books--get-json api-url))
-                 (title (gethash "title" json)))
-            (when (and title (not (string-empty-p title)))
-              (list title "" `(("WIKIPEDIA" . ,url)))))))
-    (error nil)))
+        (if (string-match "^/wiki/\\(.+\\)$" path)
+            (let* ((article (match-string 1 path))
+                   (api-url (concat "https://" host "/api/rest_v1/page/summary/" article)))
+              (org-books--fetch-json-async
+               api-url
+               (lambda (json)
+                 (let ((title (gethash "title" json)))
+                   (funcall callback
+                            (when (and title (not (string-empty-p title)))
+                              (list title "" `(("WIKIPEDIA" . ,url)))))))
+               (lambda (_reason) (funcall callback nil))))
+          (funcall callback nil)))
+    (error (funcall callback nil))))
 
-(defun org-books--get-page-title (url)
-  "Fetch page at URL and return HTML title tag content, or nil on failure."
-  (condition-case nil
-      (let* ((page-node (enlive-fetch url))
-             (title (enlive-text (enlive-query page-node [title]))))
-        (when title (org-books--clean-str title)))
-    (error nil)))
+(defun org-books--get-page-title-async (url callback)
+  "Fetch page at URL and call CALLBACK with its HTML title tag
+content, or nil on failure.
 
-(defun org-books-get-details-isbn (url)
-  "Get book details from openlibrary ISBN response from URL."
-  (let* ((json-object-type 'hash-table)
-         (json-array-type 'list)
-         (json-key-type 'string)
-         (json (org-books--get-json url))
-         (isbn (car (hash-table-keys json)))
-         (data (gethash isbn json))
-         (title (gethash "title" data))
-         (author (gethash "name" (car (gethash "authors" data)))))
-    (list title author `(("ISBN" . ,url)))))
+CALLBACK is invoked via `org-books--defer', since callers
+typically follow up with interactive prompts."
+  (org-books--fetch-html-async
+   url
+   (lambda (page-node)
+     (let ((title (enlive-text (enlive-query page-node [title]))))
+       (org-books--defer (lambda () (funcall callback (when title (org-books--clean-str title)))))))
+   (lambda (_reason) (org-books--defer (lambda () (funcall callback nil))))))
 
-(defun org-books-get-details (url)
-  "Fetch book details from given URL.
+(defun org-books-get-details-isbn (url callback)
+  "Get book details from openlibrary ISBN response from URL asynchronously.
 
-Return a list of three items: title (string), author (string) and
-an alist of properties to be applied to the org entry. If the url
-is not supported, throw an error."
-  (let ((output 'no-match)
-        (url-host-string (url-host (url-generic-parse-url url))))
+Calls CALLBACK with the result list, or nil if the ISBN was not
+found or the fetch failed."
+  (org-books--fetch-json-async
+   url
+   (lambda (json)
+     (let* ((isbn (car (hash-table-keys json)))
+            (data (and isbn (gethash isbn json)))
+            (title (and data (gethash "title" data))))
+       (funcall callback
+                (when (and data title)
+                  (list title
+                        (s-join ", " (mapcar (lambda (a) (gethash "name" a)) (gethash "authors" data)))
+                        `(("ISBN" . ,url)))))))
+   (lambda (_reason) (funcall callback nil))))
+
+(defun org-books-get-details (url callback)
+  "Fetch book details from given URL asynchronously, without
+blocking Emacs.
+
+Calls CALLBACK with a list of three items: title (string), author
+(string) and an alist of properties to be applied to the org
+entry, or with nil if the url is unsupported or the lookup
+failed. CALLBACK is invoked via `org-books--defer', so it is safe
+to show interactive prompts (as `org-books-add-url' does) from
+inside it. See `org-books-url-pattern-dispatches' for how urls
+are matched to a resolver function -- resolver functions take
+(URL CALLBACK) and must call CALLBACK exactly once."
+  (let ((url-host-string (url-host (url-generic-parse-url url)))
+        (matched nil)
+        (deferred-callback (lambda (result) (org-books--defer (lambda () (funcall callback result))))))
     (cl-dolist (pattern-fn-pair org-books-url-pattern-dispatches)
       (when (s-matches? (car pattern-fn-pair) url-host-string)
-        (setq output (funcall (cdr pattern-fn-pair) url))
+        (setq matched t)
+        (funcall (cdr pattern-fn-pair) url deferred-callback)
         (cl-return)))
-    (unless (eq output 'no-match)
-      output)))
+    (unless matched
+      (funcall deferred-callback nil))))
 
 (defun org-books-create-file (file-path)
   "Write initialization stuff in a new file at FILE-PATH."
@@ -368,31 +483,40 @@ cursor to add log entry."
 
 ;;;###autoload
 (defun org-books-add-url (url)
-  "Add book from web URL."
+  "Add book from web URL.
+
+The lookup runs in the background so Emacs stays responsive while
+it is in flight; you will be prompted once details (or a fetch
+failure) come back."
   (interactive "sUrl: ")
-  (let ((details (org-books-get-details url)))
-    (if details
-        (let* ((title (nth 0 details))
-               (author (nth 1 details))
-               (props (nth 2 details))
-               (completion-ignore-case t)
-               ;; When author is missing (e.g. Wikipedia), confirm title and ask for author
-               (final-title (if (string-empty-p author)
-                                (read-string "Book Title: " title)
-                              title))
-               (final-author (if (string-empty-p author)
-                                 (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))
-                               author)))
-          (org-books-add-book final-title final-author props))
-      ;; When the url parsing or fetching fails, we ask user manually for
-      ;; basic details while setting the URL property to the originally
-      ;; given url.
-      (message "Error in fetching url. Please enter details manually or retry.")
-      (let* ((completion-ignore-case t)
-             (page-title (org-books--get-page-title url))
-             (title (read-string "Book Title: " page-title))
-             (authors-str (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))))
-        (org-books-add-book title authors-str `(("URL" . ,url)))))))
+  (message "org-books: fetching book details from %s..." url)
+  (org-books-get-details
+   url
+   (lambda (details)
+     (if details
+         (let* ((title (nth 0 details))
+                (author (nth 1 details))
+                (props (nth 2 details))
+                (completion-ignore-case t)
+                ;; When author is missing (e.g. Wikipedia), confirm title and ask for author
+                (final-title (if (string-empty-p author)
+                                 (read-string "Book Title: " title)
+                               title))
+                (final-author (if (string-empty-p author)
+                                  (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))
+                                author)))
+           (org-books-add-book final-title final-author props))
+       ;; When the url parsing or fetching fails, we ask user manually for
+       ;; basic details while setting the URL property to the originally
+       ;; given url.
+       (message "org-books: could not fetch details for %s. Please enter details manually or retry." url)
+       (org-books--get-page-title-async
+        url
+        (lambda (page-title)
+          (let* ((completion-ignore-case t)
+                 (title (read-string "Book Title: " page-title))
+                 (authors-str (s-join ", " (completing-read-multiple "Author(s): " (org-books-all-authors)))))
+            (org-books-add-book title authors-str `(("URL" . ,url))))))))))
 
 ;;;###autoload
 (defun org-books-add-isbn (isbn)

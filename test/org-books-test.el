@@ -9,9 +9,24 @@
   (string-equal (f-read-text file-a 'utf-8)
                 (f-read-text file-b 'utf-8)))
 
+(defun org-books-test--sync (async-fn &rest args)
+  "Call ASYNC-FN with ARGS plus a capturing callback and block
+(only the test process, not real Emacs usage) until the callback
+fires, returning what it was called with. For use in tests only,
+since `org-books-get-details' and friends are asynchronous."
+  (let ((result 'org-books-test--pending))
+    (apply async-fn (append args (list (lambda (res) (setq result res)))))
+    (let ((waited 0))
+      (while (and (eq result 'org-books-test--pending) (< waited 30))
+        (accept-process-output nil 0.1)
+        (setq waited (+ waited 0.1))))
+    (when (eq result 'org-books-test--pending)
+      (error "org-books-test--sync: timed out waiting for callback"))
+    result))
+
 (ert-deftest test-goodreads ()
   (let* ((url "https://www.goodreads.com/book/show/23754.Preludes_Nocturnes")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "The Sandman, Vol. 1: Preludes & Nocturnes"))
     (should (string-equal (second res) "Neil Gaiman, Sam Kieth, Mike Dringenberg, Malcolm Jones III, Todd Klein, Karen Berger, Daniel Vozzo"))))
 
@@ -62,49 +77,59 @@ contributor list is truncated (missing the \"...more\" authors)."
 
 (ert-deftest test-amazon ()
   (let* ((url "https://www.amazon.com/Organization-Man-William-H-Whyte/dp/0812218191")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "The Organization Man"))
     (should (string-equal (second res) "William H. Whyte, Joseph Nocera"))))
 
 (ert-deftest test-amazon-with-author-page ()
   (let* ((url "https://www.amazon.com/Elements-Programming-Style-2nd/dp/0070342075")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "The Elements of Programming Style, 2nd Edition"))
     (should (string-equal (second res) "Brian W. Kernighan, P. J. Plauger"))))
 
 (ert-deftest test-isbn ()
   (let* ((isbn "0517149257")
-	       (res (org-books-get-details (org-books-get-url-from-isbn isbn))))
+	       (res (org-books-test--sync #'org-books-get-details (org-books-get-url-from-isbn isbn))))
     (should (string-equal (first res) "The Ultimate Hitchhiker's Guide"))
     (should (string-equal (second res) "Douglas Adams"))))
 
+(ert-deftest test-isbn-multiple-authors ()
+  "All authors of a multi-author book should be returned, not just the first."
+  (let* ((isbn "0201633612")
+         (res (org-books-test--sync #'org-books-get-details (org-books-get-url-from-isbn isbn))))
+    (should (string-equal (first res) "Design Patterns"))
+    (should (string-match "Erich Gamma" (second res)))
+    (should (string-match "Richard Helm" (second res)))
+    (should (string-match "Ralph Johnson" (second res)))
+    (should (string-match "John Vlissides" (second res)))))
+
 (ert-deftest test-google-books ()
   (let* ((url "https://books.google.co.in/books/about/About_Face.html?id=4c4XBAAAQBAJ&redir_esc=y")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-match "About Face" (first res)))
     (should (string-match "Alan Cooper" (second res)))))
 
 (ert-deftest test-wikipedia-fermat ()
   (let* ((url "https://en.wikipedia.org/wiki/Fermat%27s_Last_Theorem_(book)")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-match "Fermat" (first res)))
     (should (string-equal (second res) ""))))
 
 (ert-deftest test-wikipedia-tuesdays ()
   (let* ((url "https://en.wikipedia.org/wiki/Tuesdays_with_Morrie")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "Tuesdays with Morrie"))
     (should (string-equal (second res) ""))))
 
 (ert-deftest test-wikipedia-pride ()
   (let* ((url "https://en.wikipedia.org/wiki/Pride_and_Prejudice")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "Pride and Prejudice"))
     (should (string-equal (second res) ""))))
 
 (ert-deftest test-wikipedia-god-of-small-things ()
   (let* ((url "https://en.wikipedia.org/wiki/The_God_of_Small_Things")
-         (res (org-books-get-details url)))
+         (res (org-books-test--sync #'org-books-get-details url)))
     (should (string-equal (first res) "The God of Small Things"))
     (should (string-equal (second res) ""))))
 
